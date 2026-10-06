@@ -1,0 +1,70 @@
+# Channels logged by mss54_logger.py: set true to log, false to skip.
+# Columns appear in the CSV in the logger's fixed order, not the order listed here.
+# Run "python mss54_logger.py --list-channels" to see every name with its CSV column/unit.
+# Fewer DME blocks needed -> faster sampling; knock_adaptation_* is refreshed every --knock-adapt-every samples.
+
+channels:
+  # Engine / load
+  engine_speed: true
+  engine_load: true
+  relative_filling: true
+  idle_speed_target: false
+  mass_air_flow: true
+  manifold_abs_pressure: true
+  ambient_pressure: true
+
+  # Driver input / throttle
+  pedal_angle_1: true
+  pedal_angle_2: false
+  throttle_angle_actual: true
+  throttle_angle_target: true
+
+  # VANOS (bank 1)
+  intake_vanos_actual_bank_1: true
+  intake_vanos_target_bank_1: true
+  exhaust_vanos_actual_bank_1: true
+  exhaust_vanos_target_bank_1: true
+
+  # Ignition
+  ignition_angle_cylinder_1: true
+  ignition_angle_cylinder_2: false
+  ignition_angle_cylinder_3: false
+  ignition_angle_cylinder_4: false
+  ignition_angle_cylinder_5: false
+  ignition_angle_cylinder_6: false
+
+  # Knock: live retard (RAM) and learned adaptation (block 0x16)
+  knock_retard_cylinder_1: true
+  knock_retard_cylinder_2: true
+  knock_retard_cylinder_3: true
+  knock_retard_cylinder_4: true
+  knock_retard_cylinder_5: true
+  knock_retard_cylinder_6: true
+  knock_retard_sum: false
+  knock_retard_sum_bank_1: false
+  knock_retard_sum_bank_2: false
+  knock_adaptation_cylinder_1: true
+  knock_adaptation_cylinder_2: true
+  knock_adaptation_cylinder_3: true
+  knock_adaptation_cylinder_4: true
+  knock_adaptation_cylinder_5: true
+  knock_adaptation_cylinder_6: true
+
+  # Fuel
+  injection_time_cylinder_1: true
+  injection_time_cylinder_2: false
+  injection_time_cylinder_3: false
+  injection_time_cylinder_4: false
+  injection_time_cylinder_5: false
+  injection_time_cylinder_6: false
+  lambda_integrator_bank_1: true
+  lambda_integrator_bank_2: true
+
+  # Temperatures
+  intake_air_temp: true
+  engine_temp: true        # coolant
+  oil_temp: true
+  exhaust_gas_temp: false
+
+  # Vehicle
+  vehicle_speed: true

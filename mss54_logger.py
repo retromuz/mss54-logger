@@ -15,19 +15,27 @@ Examples:
     python mss54_logger.py --interval-ms 1000 --csv run1.csv
     python mss54_logger.py --knock-adapt-every 5      # refresh knock adaptation every 5th sample
     python mss54_logger.py --discover 0x23            # dump a raw block to locate fields
+    python mss54_logger.py --config track.yaml        # use another channel selection
+    python mss54_logger.py --list-channels
 
-Requires: pip install pyserial
+Channels are switched on/off in channels.yaml (next to this script). Only the DME blocks needed by
+the enabled channels are read, so fewer blocks = faster sampling.
+
+Requires: pip install -r requirements.txt   (pyserial, PyYAML)
 Runs on Windows and macOS (Intel or Apple Silicon). FTDI-based K+DCAN cables use the driver built
 into macOS; CH340-based clones need the WCH driver.
 """
 
 import argparse
 import csv
+import re
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
 
 import serial
+import yaml
 from serial.tools import list_ports
 
 DME_ADDRESS = 0x12
@@ -100,6 +108,48 @@ SIGNALS = [
     *[(f"Knock Adaptation (Cylinder {n}) [deg]", KNOCK_ADAPT_BLOCK, 51 + 4 * (n - 1), "s32", 6.103515625e-06, 0,
        None, 3) for n in range(1, 7)],
 ]
+
+
+def channel_key(column):
+    """Config key for a column, e.g. "Throttle Angle: Actual [%]" -> "throttle_angle_actual"."""
+    name = re.sub(r"\s*\[[^\]]*\]$", "", column)
+    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+
+
+CHANNELS = {channel_key(s[0]): s for s in SIGNALS}
+DEFAULT_CONFIG = Path(__file__).with_name("channels.yaml")
+
+
+def load_channels(path, explicit):
+    """Return the enabled SIGNALS entries (in table order) from a YAML channel config."""
+    if not path.exists():
+        if explicit:
+            sys.exit(f"Config file not found: {path}")
+        print(f"No {path.name} found - logging all channels.", file=sys.stderr)
+        return list(SIGNALS)
+
+    with open(path, encoding="utf-8") as f:
+        config = yaml.safe_load(f) or {}
+    channels = config.get("channels") if isinstance(config, dict) else None
+    if not isinstance(channels, dict):
+        sys.exit(f"{path}: expected a 'channels:' mapping of channel_name: true/false")
+
+    unknown = sorted(set(channels) - set(CHANNELS))
+    if unknown:
+        sys.exit(f"{path}: unknown channel(s): {', '.join(unknown)}\n"
+                 f"Run with --list-channels to see valid names.")
+    bad = sorted(k for k, v in channels.items() if not isinstance(v, bool))
+    if bad:
+        sys.exit(f"{path}: value must be true or false for: {', '.join(bad)}")
+    missing = [k for k in CHANNELS if k not in channels]
+    if missing:
+        print(f"{path.name}: {len(missing)} channel(s) not listed are disabled "
+              f"(see --list-channels)", file=sys.stderr)
+
+    enabled = [s for k, s in CHANNELS.items() if channels.get(k)]
+    if not enabled:
+        sys.exit(f"{path}: no channels enabled")
+    return enabled
 
 
 class Ds2Error(Exception):
@@ -215,21 +265,31 @@ def discover(ser, block):
         time.sleep(0.25)
 
 
-def log(ser, args):
-    interval = args.interval_ms / 1000.0
-    sources = list(dict.fromkeys(s[1] for s in SIGNALS))
-    fast_sources = [s for s in sources if s != KNOCK_ADAPT_BLOCK]
-    col = {s[0]: i for i, s in enumerate(SIGNALS)}
-    i_rpm, i_map = col["Engine Speed [RPM]"], col["Manifold Abs Pressure [mbar]"]
-    i_clt, i_rf = col["Engine Temp [deg F]"], col["Relative Filling [%]"]
-    i_kr = [col[f"Knock Retard (Cylinder {n}) [deg]"] for n in range(1, 7)]
+# Console summary: (label, column, format) - shown only for enabled channels.
+CONSOLE = [
+    ("rpm",     "Engine Speed [RPM]",           "{:5d}"),
+    ("MAP",     "Manifold Abs Pressure [mbar]", "{:6.1f}"),
+    ("RF",      "Relative Filling [%]",         "{:5.1f}"),
+    ("coolant", "Engine Temp [deg F]",          "{}"),
+]
 
-    print(f"Logging {len(SIGNALS)} channels every {args.interval_ms} ms to {args.csv} "
-          f"(knock adaptation refreshed every {args.knock_adapt_every} samples) - Ctrl+C to stop")
+
+def log(ser, args, signals):
+    interval = args.interval_ms / 1000.0
+    sources = list(dict.fromkeys(s[1] for s in signals))
+    fast_sources = [s for s in sources if s != KNOCK_ADAPT_BLOCK]
+    read_knock_adapt = KNOCK_ADAPT_BLOCK in sources
+    col = {s[0]: i for i, s in enumerate(signals)}
+    console = [(label, col[name], fmt) for label, name, fmt in CONSOLE if name in col]
+    i_kr = [col[c] for c in (f"Knock Retard (Cylinder {n}) [deg]" for n in range(1, 7)) if c in col]
+
+    print(f"Logging {len(signals)} of {len(SIGNALS)} channels every {args.interval_ms} ms to {args.csv}"
+          + (f" (knock adaptation refreshed every {args.knock_adapt_every} samples)" if read_knock_adapt else "")
+          + " - Ctrl+C to stop")
 
     with open(args.csv, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["Timestamp", "Elapsed [s]"] + [s[0] for s in SIGNALS])
+        writer.writerow(["Timestamp", "Elapsed [s]"] + [s[0] for s in signals])
 
         start = time.perf_counter()
         next_due = start
@@ -244,19 +304,20 @@ def log(ser, args):
             sample_time = datetime.now().astimezone()
             elapsed = time.perf_counter() - start
 
-            slow_sample = knock_adapt is None or sample_no % args.knock_adapt_every == 0
+            slow_sample = read_knock_adapt and (knock_adapt is None or sample_no % args.knock_adapt_every == 0)
             try:
                 if slow_sample:
                     knock_adapt = read_block(ser, KNOCK_ADAPT_BLOCK)
                 blocks = {s: read_source(ser, s) for s in fast_sources}
                 blocks[KNOCK_ADAPT_BLOCK] = knock_adapt
-                values = [decode(blocks, s) for s in SIGNALS]
+                values = [decode(blocks, s) for s in signals]
                 writer.writerow([sample_time.isoformat(timespec="milliseconds"), f"{elapsed:.3f}"] + values)
                 f.flush()
                 sample_no += 1
-                print(f"{elapsed:8.2f}s  rpm {values[i_rpm]:5d}  MAP {values[i_map]:6.1f} mbar  "
-                      f"RF {values[i_rf]:5.1f} %  coolant {values[i_clt]} F  "
-                      f"KR " + " ".join(f"{values[i]:.1f}" for i in i_kr))
+                line = [f"{elapsed:8.2f}s"] + [f"{label} {fmt.format(values[i])}" for label, i, fmt in console]
+                if i_kr:
+                    line.append("KR " + " ".join(f"{values[i]:.1f}" for i in i_kr))
+                print("  ".join(line))
             except (TimeoutError, Ds2Error, serial.SerialException) as e:
                 print(f"WARNING: {e}", file=sys.stderr)
 
@@ -275,6 +336,11 @@ def parse_args():
                    help="serial port (default: COM1 on Windows; auto-detected USB serial adapter on "
                         "macOS/Linux, e.g. /dev/cu.usbserial-XXXX)")
     p.add_argument("--list-ports", action="store_true", help="list serial ports and exit")
+    p.add_argument("--config", type=Path, default=None,
+                   help=f"YAML file selecting the channels to log (default: {DEFAULT_CONFIG.name} "
+                        "next to this script; all channels if it does not exist)")
+    p.add_argument("--list-channels", action="store_true",
+                   help="list channel names usable in the config and exit")
     p.add_argument("--interval-ms", type=int, default=700,
                    help="time between CSV samples in ms (default 700; ~600 ms is the minimum at 9600 baud)")
     p.add_argument("--knock-adapt-every", type=int, default=10, metavar="N",
@@ -314,6 +380,13 @@ def main():
         for p in list_ports.comports():
             print(f"{p.device:30s} {p.description}")
         return
+    if args.list_channels:
+        for key, s in CHANNELS.items():
+            print(f"{key:36s} {s[0]}")
+        return
+    signals = None
+    if args.discover is None:
+        signals = load_channels(args.config or DEFAULT_CONFIG, explicit=args.config is not None)
     port = args.port or default_port()
     print(f"Port: {port}")
     ser = open_kline(port)
@@ -322,7 +395,7 @@ def main():
         if args.discover is not None:
             discover(ser, args.discover)
         else:
-            log(ser, args)
+            log(ser, args, signals)
     except KeyboardInterrupt:
         print("\nStopped.")
     finally:
